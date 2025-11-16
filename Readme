@@ -1,0 +1,71 @@
+Health Assist Robot  
+TEAM NUMBER :
+25AACR20
+MEMBER 1:
+Shaik Sameena
+MEMBER 2:
+Kaushik
+Member 3:
+Akshaya
+
+
+
+# HEALTH ASSIST ROBOT  
+A smart IoT-powered hospital service robot designed to deliver **medicines, food, and water** to patients, equipped with **live camera feed**, **temperature monitoring**, **medicine queue system**, and **manual remote control**.
+
+---
+
+##  Overview  
+Health Assist Robot reduces workload on nurses by automating the delivery of patient essentials.  
+Using ESP32 + ESP32-CAM + Motor driver + Servos + Temperature sensors, the robot can:
+
+- Take patient orders  
+- Store them in a queue  
+- Move through hospital rooms  
+- Dispense medicine for a selected bed  
+- Stream live video  
+- Display real-time temperature  
+
+---
+
+##  Features  
+✔ Medicine order system  
+✔ Live ESP32-CAM video streaming  
+✔ Motor control via W/A/S/D  
+✔ Temperature sensor panel  
+✔ Queue management system  
+✔ Medicine dispenser (bed-wise)  
+✔ Fully web-based UI  
+✔ Responsive mobile interface  
+
+---
+
+##  System Architecture  
+![Architecture](docs/architecture.png)
+
+---
+
+##  Hardware Used  
+- ESP32 Dev Module  
+- ESP32-CAM  
+- L298N Motor Driver  
+- MG996R Servo Motors  
+- MG90S Micro Servos  
+- 4 × Hub Motors  
+- 12V Battery  
+- DS18B20 Temperature Sensor  
+- DHT11 Humidity Sensor  
+- Food Heater Pad  
+- Jumper wires, chassis, acrylic sheets
+
+---
+
+##  Software Used  
+- Arduino IDE  
+- ESP32 Core  
+- HTML + CSS + JavaScript  
+- WebServer Library  
+- DallasTemperature Library  
+- OneWire Library  
+
+
