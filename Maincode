@@ -1,0 +1,409 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+
+// --- WiFi Credentials ---
+const char* ssid = "Aasrith";
+const char* password = "12345678";
+
+// ESP32-CAM's IP address
+#define ESP32_CAM_IP "10.19.123.34"
+
+// DS18B20 temp sensor pin
+#define ONE_WIRE_BUS 18
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+
+WebServer server(80);
+
+const int ENA = 25, IN1 = 26, IN2 = 27, ENB = 33, IN3 = 32, IN4 = 14; // Motor pins
+float lastTemperature = NAN;
+unsigned long lastSerialTempTime = 0;
+
+const char* medicineList[8] = {
+  "Paracetamol", "Ibuprofen", "Amoxicillin", "Cetirizine",
+  "Azithromycin", "Metformin", "Amlodipine", "Atorvastatin"
+};
+
+#define QUEUE_MAX_LEN 10
+
+typedef struct { 
+  String medicine, bed, food, water; 
+} Order;
+
+Order queueMemory[QUEUE_MAX_LEN];
+volatile int queueHead = 0, queueTail = 0, queueCount = 0;
+
+bool addToQueue(Order order) {
+  if (queueCount >= QUEUE_MAX_LEN) return false;
+  queueMemory[queueTail] = order;
+  queueTail = (queueTail + 1) % QUEUE_MAX_LEN;
+  queueCount++;
+  return true;
+}
+
+void printQueue() {
+  Serial.println("=== Current Order Queue ===");
+  int idx = queueHead;
+  for (int i = 0; i < queueCount; i++) {
+    Serial.printf(" #%d > Medicine: %s, Bed: %s, Food: %s, Water: %s\n",
+      i + 1, queueMemory[idx].medicine.c_str(), queueMemory[idx].bed.c_str(),
+      queueMemory[idx].food.c_str(), queueMemory[idx].water.c_str());
+    idx = (idx + 1) % QUEUE_MAX_LEN;
+  }
+  Serial.println("==========================");
+}
+
+String queueHtml() {
+  String html = "<div style='font-size:1.01rem;'>";
+  int idx = queueHead;
+
+  if (queueCount == 0) {
+    html += "<div style='color:#64748b; margin:18px;'>Queue empty</div>";
+  }
+
+  for (int i = 0; i < queueCount; i++) {
+    html += "<div style='margin: 16px 0; padding: 10px 7px; background:#e0e7ef; border-radius:7px;line-height:1.3;'>"
+            "<span style='font-weight:700; color:#0ea5e9; letter-spacing:.04em; font-size:1.10rem;'>Bed: " 
+            + queueMemory[idx].bed + "</span><br>"
+            "<span style='color:#134e4a;'>" + queueMemory[idx].medicine + "</span></div>";
+    idx = (idx + 1) % QUEUE_MAX_LEN;
+  }
+
+  html += "</div>";
+  return html;
+}
+
+// --------- MOTOR DRIVER FUNCTIONS ----------
+void moveForward() {
+  Serial.println("BOT REMOTE: FORWARD");
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+  analogWrite(ENA, 200); analogWrite(ENB, 200);
+}
+
+void moveReverse() {
+  Serial.println("BOT REMOTE: REVERSE");
+  digitalWrite(IN1, LOW); digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, HIGH);
+  analogWrite(ENA, 200); analogWrite(ENB, 200);
+}
+
+void moveLeft() {
+  Serial.println("BOT REMOTE: LEFT");
+  digitalWrite(IN1, LOW); digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+  analogWrite(ENA, 200); analogWrite(ENB, 200);
+}
+
+void moveRight() {
+  Serial.println("BOT REMOTE: RIGHT");
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, HIGH);
+  analogWrite(ENA, 200); analogWrite(ENB, 200);
+}
+
+void stopBot() {
+  Serial.println("BOT REMOTE: STOP");
+  analogWrite(ENA, 0); analogWrite(ENB, 0);
+  digitalWrite(IN1, LOW); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, LOW);
+}
+
+// Dummy dispenser function
+void dispenseMedicine(int bedNum) {
+  Serial.printf("DISPENSER RUN: Medicine delivery for BED-%d\n", bedNum);
+}
+
+// Dispense endpoint
+void handleDispense() {
+  if (!server.hasArg("bed")) { 
+    server.send(400, "text/plain", "Missing"); 
+    return; 
+  }
+
+  int bedNum = server.arg("bed").toInt();
+  if (bedNum >= 1 && bedNum <= 4) {
+    dispenseMedicine(bedNum);
+    server.send(200, "text/plain", "Dispensed for BED-" + String(bedNum));
+  } else {
+    server.send(400, "text/plain", "Invalid Bed");
+  }
+}
+
+// AJAX temperature endpoint
+void handleTemp() {
+  sensors.requestTemperatures();
+  float t = sensors.getTempCByIndex(0);
+  if (t == -127.00 || isnan(t)) server.send(200, "text/plain", "Sensor error");
+  else server.send(200, "text/plain", String(t, 2));
+}
+
+// Movement endpoint
+void handleMove() {
+  if (!server.hasArg("cmd")) { 
+    server.send(400, "text/plain", "Missing"); 
+    return; 
+  }
+
+  String cmd = server.arg("cmd");
+
+  if (cmd == "forward") moveForward();
+  else if (cmd == "left") moveLeft();
+  else if (cmd == "right") moveRight();
+  else if (cmd == "reverse") moveReverse();
+  else if (cmd == "stop") stopBot();
+
+  server.send(200, "text/plain", "OK");
+}
+
+// TEMP PANEL CSS
+String tempPanelHtml() {
+  return "<div id='tempbox' style='position:fixed;top:12px;left:12px;padding:11px 17px 9px 17px;z-index:110;"
+         "font-size:1.23em;background:#0ea5e9;color:#fff;font-weight:600;border-radius:11px;"
+         "box-shadow:0 2px 8px rgba(14,165,233,0.13);'>Temp: <span id='tempspan'>--</span>&deg;C</div>";
+}
+
+// Remote page (Camera + Controls + Temp)
+String remoteControlPage() {
+  String page;
+
+  page += "<!DOCTYPE html><html><head><title>Bot Remote Control</title>"
+          "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+          "<style>"
+          "body { background:#181926; color:#e0e6ed; font-family:sans-serif; margin:0; }"
+          "#camstream { width:98vw; max-width:520px; border-radius:14px; margin:18px auto; display:block; }"
+          ".controls { margin:24px auto; text-align:center;}"
+          ".controls button { font-size:1.65em; margin:0 22px; padding:12px 34px; border-radius:10px; background:#3b82f6; color:#fff; border:none;}"
+          ".controls button:hover { background:#38bdf8; }"
+          ".dispenser-controls { margin:auto; display:flex; justify-content:center;gap:18px;align-items:center;margin-top:38px;}"
+          ".bedbtn{background:#f4f4fb;color:#134e4a;border:none;border-radius:16px;font-size:1.01em;padding:9px 17px;margin-bottom:8px;box-shadow:0 2px 7px rgba(30,64,175,0.07);cursor:pointer;transition:background .16s;outline:none;}"
+          ".bedbtn:active{background:#dbeafe;}"
+          "h2 { text-align:center;}"
+          "</style></head><body>";
+
+  page += tempPanelHtml();
+  page += "<h2>Bot Remote Control</h2>"
+          "<img id=\"camstream\" src=\"http://" ESP32_CAM_IP ":81/stream\">"
+          "<div class=\"controls\">"
+          "<button onclick=\"move('forward')\">W</button>"
+          "<button onclick=\"move('left')\">A</button>"
+          "<button onclick=\"move('reverse')\">S</button>"
+          "<button onclick=\"move('right')\">D</button>"
+          "<button onclick=\"move('stop')\">SPACE</button>"
+          "</div>";
+
+  page += "<div class=\"dispenser-controls\">";
+  for (int i = 1; i <= 4; i++) {
+    page += "<button class='bedbtn' onclick='dispense(" + String(i) + ")'>BED-" + String(i) + "</button>";
+  }
+  page += "</div>";
+
+  page += "<script>"
+          "function move(cmd){ fetch('/move?cmd='+cmd); }"
+          "window.onkeydown = function(e){"
+          "  let k=e.key.toLowerCase();"
+          "  if(k==='w')move('forward');"
+          "  else if(k==='a')move('left');"
+          "  else if(k==='d')move('right');"
+          "  else if(k==='s')move('reverse');"
+          "  else if(k===' ')move('stop');"
+          "}"
+          "function dispense(b){ fetch('/dispense?bed='+b); }"
+          "function updateTemp(){ fetch('/temp').then(x=>x.text()).then(t=>{document.getElementById('tempspan').innerHTML = t;}); }"
+          "setInterval(updateTemp, 5000);"
+          "updateTemp();"
+          "</script></body></html>";
+
+  return page;
+}
+
+// Order page
+String htmlPage() {
+  String page = "<!DOCTYPE HTML><html><head>"
+                "<title>Health Assist Bot Order</title>"
+                "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+                "<style>"
+                "body { background: #f7fafc; font-family: 'Segoe UI', sans-serif; margin: 0; padding: 0; }"
+                ".card { max-width: 370px; background: #fff; margin: 60px auto; border-radius: 10px;"
+                "box-shadow: 0 8px 16px rgba(0,0,0,0.08); padding: 30px 36px 18px 36px; }"
+                "h2   { color: #3b82f6; margin-bottom: 18px; }"
+                "label { display: block; margin-top: 18px; margin-bottom: 9px; font-weight: 600; font-size: 1.04rem; color: #1e293b;}"
+                "select, .radio-group { width: 100%; }"
+                "select { padding: 6px; font-size:1rem; border: 1px solid #d1d5db; border-radius: 5px; }"
+                ".radio-group label { display: inline-block; margin-right: 20px; font-weight:400; }"
+                ".btn { margin-top: 24px; width: 100%; background:#1d4ed8; color:#fff; border:none;"
+                "padding:11px 0; font-size:1rem; font-weight:600; border-radius:5px;"
+                "box-shadow:0 2px 4px rgba(0,0,0,0.03);}"
+                ".btn:hover { background: #2563eb; cursor: pointer; }"
+                ".queuebox {position: fixed; right: 0px; top: 0px; bottom: 0px; width: 170px; background: #fff;"
+                "border-left: 2px solid #d1d5db; box-shadow: -4px 0 28px rgba(30,64,175,0.10); padding: 20px 14px; z-index: 100;"
+                "border-radius:20px 0 0 20px; opacity: 0.98;}"
+                ".queuebox h3 {color: #0e7490; text-align:center; font-size:1.16rem; font-weight:700; letter-spacing:.09em;}"
+                "#queuecontent { max-height:calc(100vh - 60px); overflow-y:auto; }"
+                "</style></head><body>";
+
+  page += tempPanelHtml();
+
+  page += "<div class=\"card\">"
+          "<h2>Place Order</h2>"
+          "<form method=\"POST\" action=\"/\">"
+          "<label>Medicine</label>"
+          "<select name=\"medicine\" required>";
+
+  for (int i = 0; i < 8; i++) {
+    page += "<option value='" + String(medicineList[i]) + "'>" + String(medicineList[i]) + "</option>";
+  }
+
+  page += "</select>"
+          "<label>Bed</label>"
+          "<select name=\"bed\" required>";
+
+  for (int i = 1; i <= 6; i++) {
+    page += "<option value='bed-" + String(i) + "'>Bed-" + String(i) + "</option>";
+  }
+
+  page += "</select>"
+          "<label>Food</label>"
+          "<div class=\"radio-group\">"
+          "<label><input type=\"radio\" name=\"food\" value=\"yes\" required> Yes</label>"
+          "<label><input type=\"radio\" name=\"food\" value=\"no\" required> No</label>"
+          "</div>"
+          "<label>Water</label>"
+          "<div class=\"radio-group\">"
+          "<label><input type=\"radio\" name=\"water\" value=\"yes\" required> Yes</label>"
+          "<label><input type=\"radio\" name=\"water\" value=\"no\" required> No</label>"
+          "</div>"
+          "<button class=\"btn\" type=\"submit\">Submit Order</button>"
+          "</form></div>"
+          "<div class=\"queuebox\" id=\"queuebox\"><h3>Order Queue</h3>"
+          "<div id=\"queuecontent\">Loading...</div></div>";
+
+  page += "<script>"
+          "function fetchQueue() {"
+          "var xhr = new XMLHttpRequest();"
+          "xhr.onreadystatechange = function() {"
+          "if (xhr.readyState === XMLHttpRequest.DONE && xhr.status === 200) {"
+          "document.getElementById(\"queuecontent\").innerHTML = xhr.responseText;}}"
+          "xhr.open(\"GET\", \"/queue\", true); xhr.send();}"
+          "setInterval(fetchQueue, 2000);"
+          "window.onload = fetchQueue;"
+          
+          "function updateTemp(){ fetch('/temp').then(x=>x.text()).then(t=>{document.getElementById('tempspan').innerHTML = t;}); }"
+          "setInterval(updateTemp, 5000); updateTemp();"
+          "</script></body></html>";
+
+  return page;
+}
+
+void handleQueue() { 
+  server.send(200, "text/html", queueHtml()); 
+}
+
+void handleRoot() {
+  if (server.method() == HTTP_POST) {
+    Order order;
+    order.medicine = server.arg("medicine");
+    order.bed      = server.arg("bed");
+    order.food     = server.arg("food");
+    order.water    = server.arg("water");
+
+    String confirmPage = "<!DOCTYPE HTML><html><head>"
+                         "<meta http-equiv='refresh' content='2; url=/remote'/>"
+                         "<title>Order Submitted</title>"
+                         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+                         "<style>"
+                         "body { background: #f7fafc; font-family: 'Segoe UI', sans-serif; margin:0;}"
+                         ".card { max-width: 370px; background: #fff; margin: 80px auto; border-radius: 10px;"
+                         "box-shadow: 0 8px 16px rgba(0,0,0,0.07); padding: 38px 36px 22px 36px; text-align:center;}"
+                         "h2 { color: #3b82f6; } p { color: #22223b; font-size:1.03rem; }"
+                         ".subtext { color: #64748b; font-size: .95rem; }"
+                         ".loader {margin:16px auto; border: 5px solid #e0e7ef; border-top: 5px solid #3b82f6;"
+                         "border-radius: 50%; width: 34px; height: 34px; animation: spin 1.2s linear infinite;}"
+                         "@keyframes spin { 0% { transform: rotate(0deg);} 100% { transform: rotate(360deg);} }"
+                         "</style></head><body>" 
+                         + tempPanelHtml() +
+                         "<div class=\"card\">"
+                         "<div class=\"loader\"></div>"
+                         "<h2>Order Submitted!</h2>"
+                         "<p>Your request was received and will be processed.</p>"
+                         "<div class=\"subtext\">Redirecting to Bot Remote...</div>"
+                         "</div></body></html>";
+
+    if (addToQueue(order)) {
+      Serial.println("----- Order Added to Queue -----");
+      Serial.println("Medicine: " + order.medicine);
+      Serial.println("Bed: " + order.bed);
+      Serial.println("Food: " + order.food);
+      Serial.println("Water: " + order.water);
+      Serial.println("-------------------------------");
+
+      printQueue();
+      server.send(200, "text/html", confirmPage);
+    } else {
+      server.send(500, "text/html", "<h3>Queue is full! Try again later.</h3>");
+    }
+
+  } else {
+    server.send(200, "text/html", htmlPage());
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+
+  Serial.print("\nConnecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED) { 
+    delay(500); 
+    Serial.print("."); 
+  }
+
+  Serial.print("\nWiFi connected. IP: "); 
+  Serial.println(WiFi.localIP());
+
+  pinMode(IN1, OUTPUT); 
+  pinMode(IN2, OUTPUT); 
+  pinMode(IN3, OUTPUT); 
+  pinMode(IN4, OUTPUT);
+
+  pinMode(ENA, OUTPUT); 
+  pinMode(ENB, OUTPUT);
+
+  pinMode(ONE_WIRE_BUS, INPUT_PULLUP);
+  sensors.begin();
+
+  queueHead = queueTail = queueCount = 0;
+
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/", HTTP_POST, handleRoot);
+  server.on("/queue", HTTP_GET, handleQueue);
+  server.on("/remote", HTTP_GET, [](){ server.send(200, "text/html", remoteControlPage()); });
+  server.on("/move", HTTP_GET, handleMove);
+  server.on("/dispense", HTTP_GET, handleDispense);
+  server.on("/temp", HTTP_GET, handleTemp);
+
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+
+  unsigned long now = millis();
+  if (now - lastSerialTempTime > 60000) {
+    sensors.requestTemperatures();
+    float temperature = sensors.getTempCByIndex(0);
+
+    Serial.print("Temperature: ");
+    Serial.println(temperature);
+
+    if (temperature == -127.00) {
+      Serial.println("⚠ Sensor not detected! Check wiring.");
+    }
+
+    lastSerialTempTime = now;
+  }
+}
